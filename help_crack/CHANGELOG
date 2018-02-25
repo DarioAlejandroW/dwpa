@@ -85,3 +85,7 @@ ver 0.8.8 / 2 Jul 2016
  * drop aircrack-ng and pyrit support since they
    don't currently support AP nonce corrections
  * python 2/3 compatability
+ *      23 Feb 2018
+ * DAW added log file with hccapx handshakes for later offline cracking
+ * DAW added log file with cracked handshakes since potfile is disabled
+ * DAW added function to call routerkeygen
