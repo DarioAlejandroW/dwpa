@@ -2,6 +2,7 @@
 '''Clientside part of dwpa distributed cracker
 The source code is distributed under GPLv3+ license
 author: Alex Stanev, alex at stanev dot org
+Include additions by Dario_AlejandroW (DAW) as noted. Rev date 23 Feb 2018
 web: http://wpa-sec.stanev.org'''
 
 from __future__ import print_function
@@ -496,8 +497,17 @@ class HelpCrack(object):
                     self.pprint('Exception: {0}'.format(e), 'FAIL')
                     self.sleepy()
                     continue
+                
+        #DAW add call to routerkeygen if cracked.txt
+        if(dictname == 'cracked.txt'):
+            essid_length = handshake[9]
+            essid = handshake[10:(10+essid_length)].rstrip(b'\0')
+            bssid = netdata['bssid']
+            getdict = 0     #DAW re-activate once mysql database running
+            keygen_return = routerkeygen(self, bssid, ssid, getdict)
 
-            return dictname
+
+        return dictname
 
     def prepare_challenge(self):
         '''prepare chalenge with known PSK'''
@@ -563,9 +573,14 @@ class HelpCrack(object):
 
         return None
     
-##***************************routerkeygen****************************************
-    
-    #def routerkeygen(self, bssid, ssid, getdict):
+#***************************routerkeygen****************************************
+
+    def routerkeygen(self, bssid, ssid, getdict):
+    #bssid is expected in 6 colon separated octets
+    #ssid should be utf-8
+    #getdict is the trigger to download cracked.txt (for when a file is inserted in wpa  sql)
+    #candidates are appended to cracked.txt and will be overwritten each time it is downloaded
+    #routine should be called after checking dict and downloading current cracked.txt
         #if getdict == 1:
             #g=getcracked()
                 
@@ -587,112 +602,112 @@ class HelpCrack(object):
             #print cc['FAIL'] + 'Exception: {0}'.format(e) + cc['ENDC']
                 
         
-        #subprocess.call("cat 10k-most-common.txt >>cracked.txt", shell=True)
+        subprocess.call("cat 10k-most-common.txt >>cracked.txt", shell=True)
         
         
-        #bssidupper = bssid.upper()
-        #print '**********************************************************************************'
-        #print 'Trying routerkeygen for {0} {1}' .format(bssidupper, ssid)
-        #keygen = 'routerkeygen -m {0} -s "{1}" -q' .format(bssidupper, ssid)
-        #print keygen
-        #candid = open(candid_file, 'w')
-        #try:
-            #subprocess.call(shlex.split(keygen), stdout=candid)
-        #except subprocess.CalledProcessError as e:
-            #print cc['FAIL'] + 'Exception: {0}'.format(e) + cc['ENDC']
-            #pass
+        bssidupper = bssid.upper()
+        print '**********************************************************************************'
+        print 'Trying routerkeygen for {0} {1}' .format(bssidupper, ssid)
+        keygen = 'routerkeygen -m {0} -s "{1}" -q' .format(bssidupper, ssid)
+        print keygen
+        candid = open(candid_file, 'w')
+        try:
+            subprocess.call(shlex.split(keygen), stdout=candid)
+        except subprocess.CalledProcessError as e:
+            print cc['FAIL'] + 'Exception: {0}'.format(e) + cc['ENDC']
+            pass
         
-        #candid.close()
-        #subprocess.call("cat candidates.txt >>cracked.txt", shell=True)
-        #f = open("cracked.txt", 'a')
-        #f.write(ssid + "\n")
-        #f.write(ssid.lower() + "\n")
-        #f.write(ssid.upper() + "\n")
-        #f.write(ssid.capitalize() + "\n")
-        #f.write(ssid.replace(" ","") + "\n")
-        #f.write(ssid.replace("_","") + "\n")
-        #f.write(ssid.replace("-","") + "\n")
-        #f.write(ssid.replace(".","") + "\n")
-        #f.write(bssid.replace(":","") + "\n")
-        #f.write(bssidupper.replace(":","") + "\n")
+        candid.close()
+        subprocess.call("cat candidates.txt >>cracked.txt", shell=True)
+        f = open("cracked.txt", 'a')
+        f.write(ssid + "\n")
+        f.write(ssid.lower() + "\n")
+        f.write(ssid.upper() + "\n")
+        f.write(ssid.capitalize() + "\n")
+        f.write(ssid.replace(" ","") + "\n")
+        f.write(ssid.replace("_","") + "\n")
+        f.write(ssid.replace("-","") + "\n")
+        f.write(ssid.replace(".","") + "\n")
+        f.write(bssid.replace(":","") + "\n")
+        f.write(bssidupper.replace(":","") + "\n")
     
-    ## ssid walk to extract substrings. j is the length of the substring, i is the start of the string
-        #length = len(ssid)
-        #if length > 3:
-            #j = 4
-            #while (j < length+1):
-                #i = 0
-                #while (i <= length-j):
-                    #substring = ssid[i:i+j]
-                    #f.write(substring.lower() + "\n")
-                    #f.write(substring.upper() + "\n")
-                    #f.write(substring.capitalize() + "\n")	        
-                    #i = i +1	    
-                #j = j + 1
+    # ssid walk to extract substrings. j is the length of the substring, i is the start of the string
+        length = len(ssid)
+        if length > 3:
+            j = 4
+            while (j < length+1):
+                i = 0
+                while (i <= length-j):
+                    substring = ssid[i:i+j]
+                    f.write(substring.lower() + "\n")
+                    f.write(substring.upper() + "\n")
+                    f.write(substring.capitalize() + "\n")	        
+                    i = i +1	    
+                j = j + 1
             
-    ##mac walk
-        #mac = bssidupper
-        #mac1 = mac[0:2]
-        #mac2 = mac[3:5]
-        #mac3 = mac[6:8]
-        #mac4 = mac[9:11]
-        #mac5 = mac[12:14]
-        #mac6 = mac[15:17]
-        #macleft = mac[0:14]
-        #macshort = macleft.replace(":","")
-        #maclen = len(macshort)		
-        #prefix = '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-        #j = -16
-        #while (j <= 16):
-            #mac6dec = int(mac6,16)
-            #mac6increment = mac6dec + j
-            #if mac6increment <16:
-                #incmac6 = '0' + hex(mac6increment)[-1:]
-            #else:
-                #incmac6 = hex(mac6increment)[-2:]
-            #newmac = macshort + incmac6
-            #newmacright = newmac[-6:]
-            #decnewmac = int(newmac,16)
-            #f.write(newmac[-8:].upper() + "\n")
-            #f.write(newmac[-9:].upper() + "\n")
-            #f.write(newmac[-10:].upper() + "\n")
-            #f.write(newmac[-11:].upper() + "\n")
-            #f.write(newmac[-12:].upper() + "\n")
-            #dec8 = decnewmac % 100000000
-            #dec9 = decnewmac % 1000000000
-            #dec10 = decnewmac % 10000000000
-            #dec11 = decnewmac % 100000000000
-            #dec12 = decnewmac % 1000000000000
-            #f.write('{:d}'.format(dec8) + "\n")
-            #f.write('{:d}'.format(dec9) + "\n")
-            #f.write('{:d}'.format(dec10) + "\n")
-            #f.write('{:d}'.format(dec11) + "\n")
-            #f.write('{:d}'.format(dec12) + "\n")
+    #mac walk
+        mac = bssidupper
+        mac1 = mac[0:2]
+        mac2 = mac[3:5]
+        mac3 = mac[6:8]
+        mac4 = mac[9:11]
+        mac5 = mac[12:14]
+        mac6 = mac[15:17]
+        macleft = mac[0:14]
+        macshort = macleft.replace(":","")
+        maclen = len(macshort)		
+        prefix = '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+        j = -16
+        while (j <= 16):
+            mac6dec = int(mac6,16)
+            mac6increment = mac6dec + j
+            if mac6increment <16:
+                incmac6 = '0' + hex(mac6increment)[-1:]
+            else:
+                incmac6 = hex(mac6increment)[-2:]
+            newmac = macshort + incmac6
+            newmacright = newmac[-6:]
+            decnewmac = int(newmac,16)
+            f.write(newmac[-8:].upper() + "\n")
+            f.write(newmac[-9:].upper() + "\n")
+            f.write(newmac[-10:].upper() + "\n")
+            f.write(newmac[-11:].upper() + "\n")
+            f.write(newmac[-12:].upper() + "\n")
+            dec8 = decnewmac % 100000000
+            dec9 = decnewmac % 1000000000
+            dec10 = decnewmac % 10000000000
+            dec11 = decnewmac % 100000000000
+            dec12 = decnewmac % 1000000000000
+            f.write('{:d}'.format(dec8) + "\n")
+            f.write('{:d}'.format(dec9) + "\n")
+            f.write('{:d}'.format(dec10) + "\n")
+            f.write('{:d}'.format(dec11) + "\n")
+            f.write('{:d}'.format(dec12) + "\n")
 
-            ##Add last 6 incremented mac to ssid from 2 to length 
-            #i = 2
-            #while i <= length:
-                #combo = '{0}{1}' .format(ssid[0:i], newmacright.upper())
-                #f.write(combo + "\n")
-                #i = i + 1
+            #Add last 6 incremented mac to ssid from 2 to length 
+            i = 2
+            while i <= length:
+                combo = '{0}{1}' .format(ssid[0:i], newmacright.upper())
+                f.write(combo + "\n")
+                i = i + 1
                 
-            ##Add prefixes to incremented mac from 8 to 12 in length
-            #n = 0
-            #while n < 37:
-                #k = 8
-                #while k < 13:
-                    #prefixmac = prefix[n-1:n] + newmac[-k:].upper()
-                    #f.write(prefixmac + "\n")
-                    #k = k + 1
-                #n = n + 1	    
+            #Add prefixes to incremented mac from 8 to 12 in length
+            n = 0
+            while n < 37:
+                k = 8
+                while k < 13:
+                    prefixmac = prefix[n-1:n] + newmac[-k:].upper()
+                    f.write(prefixmac + "\n")
+                    k = k + 1
+                n = n + 1	    
                 
-            #j = j + 1
+            j = j + 1
 
         
-        #f.close()
-        #return(1)
+        f.close()
+        return(1)
     
-#*****************************run_cracker**************************************
+*****************************run_cracker**************************************
 
 
     def run_cracker(self, dictname, disablestdout=False):
