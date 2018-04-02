@@ -22,7 +22,7 @@ Included routines that manipulate the essid as follows:
     Strips essid of -_:,. and <space>
     Extracts all substrings of length 4 or more
     Converts them to raw, lower, upper, and capital case
-    Adds common 3 digit ending, 1234-1234567890 endings, 0-9 endings, rotates right and left, adds spaces across string
+    Adds common 3 digit ending, 1234-1234567890 endings, 0-9 00-99 suffixes, rotates right and left, adds spaces across string
     Adds years from 1921 to 2020 to each substring
 Manipulates bssid as follows:
   Increment bssid from -16 to +16. 
