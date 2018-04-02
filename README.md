@@ -35,7 +35,7 @@ Manipulates bssid as follows:
     
     b0:b2:dc:52:bd:64|RASYONAL|Rasyo2012          essid substring with year added
     
-    14:b7:f8:e4:f5:95|TC8715D8F|TC8715DE4F58F     bssid with "T" prefix
+    14:b7:f8:e4:f5:95|TC8715D8F|TC8715DE4F58F     essid substring and bssid substring
     
     1c:7e:e5:3c:b6:26|mansourah_admin|mansourah4  essid substring with 1 digit suffix
     
