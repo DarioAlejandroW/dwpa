@@ -46,6 +46,8 @@ Manipulates bssid as follows:
     
     00:0c:42:31:43:1e|Sjotun Camping|camping007   essid substring with common 3 digit suffix
     
+    64:70:02:77:16:e8|WLAN_16E8|T6470027716E8     bssid with "T" prefix
+    
 
 NOTE: these are hacks I have developed over time, and the code may be a little sloppy. Sorry..I'll get around
       to cleaning it up someday, but at least it works.
