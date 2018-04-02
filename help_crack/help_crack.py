@@ -1,13 +1,15 @@
 #!/usr/bin/env python
-'''Clientside part of dwpa distributed cracker
+'''Clientside part of dwpa distributed cracker Ver 1.1.2 based on 1.0.2
 The source code is distributed under GPLv3+ license
-author: Alex Stanev, alex at stanev dot org
-Include additions by Dario_AlejandroW (DAW) as noted. Rev date 23 Feb 2018
-web: http://wpa-sec.stanev.org'''
+author: Alex Stanev, alex at stanev dot org  additions by Dario Alejandro
+web: https://wpa-sec.stanev.org'''
+
 
 from __future__ import print_function
 import argparse
 import sys
+reload(sys)                             # DAW
+sys.setdefaultencoding('utf8')          # DAW
 import os
 import platform
 import subprocess
@@ -19,14 +21,15 @@ import gzip
 import re
 import time
 import json
-import base64
-import StringIO         #DAW
 import binascii
-import datetime			#DAW
-import MySQLdb			#DAW
 import struct
 from distutils.version import StrictVersion
 from functools import partial
+import StringIO         # DAW
+import base64			# DAW
+import datetime			# DAW
+import MySQLdb			# DAW Not used in 1.1.2
+import socket			# DAW
 
 try:
     from urllib import urlretrieve
@@ -48,15 +51,19 @@ except NameError:
 
 #configuration
 conf = {
-    'base_url': 'http://wpa-sec.stanev.org/',
+    'base_url': 'https://wpa-sec.stanev.org/',
     'res_file': 'help_crack.res',
     'net_file': 'help_crack.net',
     'key_file': 'help_crack.key',
+    'log_file': 'help_crack.log',                   # DAW
+    'can_file': 'candidates.txt',                   # DAW
     'additional': None,
+    'custom': None,
     'format': None,
+    'potfile': None,
     'cracker': '',
     'coptions': '',
-    'hc_ver': '0.9.0'
+    'hc_ver': '1.1.2'                               # DAW Follows Alex's version 1.0.2 Rev date 30 Mar 2018
 }
 conf['help_crack'] = conf['base_url'] + 'hc/help_crack.py'
 conf['help_crack_cl'] = conf['base_url'] + 'hc/CHANGELOG'
@@ -66,7 +73,7 @@ conf['put_work_url'] = conf['base_url'] + '?put_work'
 
 class HelpCrack(object):
     '''Main helpcrack class'''
-    #decompression block size 64k
+    # decompression block size 64k
     blocksize = 1 << 16
     conf = None
 
@@ -164,7 +171,7 @@ class HelpCrack(object):
                             os.chmod(sys.argv[0], stat.S_IXUSR | stat.S_IRUSR | stat.S_IWUSR)
                         except OSError as e:
                             self.pprint('Exception: {0}'.format(e), 'FAIL')
-                            #TODO: think of workaround locking on win32
+                            # TODO: think of workaround locking on win32
                             if os.name == 'nt':
                                 self.pprint('You are running under win32, rename help_crack.py.new over help_crack.py', 'OKBLUE')
                         self.pprint('help_crack updated, run again', 'OKGREEN')
@@ -265,14 +272,14 @@ class HelpCrack(object):
 
         tools = []
 
-        #hashcat
+        # hashcat
         bits = platform.architecture()[0]
         if bits == '64bit':
             tools += run_hashcat(['hashcat64.bin', 'hashcat64', 'hashcat'])
         else:
             tools += run_hashcat(['hashcat32.bin', 'hashcat32', 'hashcat'])
 
-        #John the Ripper
+        # John the Ripper
         tools += run_jtr()
 
         if not tools:
@@ -286,7 +293,7 @@ class HelpCrack(object):
         for index, ttool in enumerate(tools):
             print('{0}: {1}'.format(index, ttool))
         print('9: Quit')
-        while 1:
+        while True:
             user = userinput('Index:')
             if user == '9':
                 exit(0)
@@ -296,30 +303,6 @@ class HelpCrack(object):
             except (ValueError, IndexError):
                 self.pprint('Wrong index', 'WARNING')
 
-    def get_work_wl(self, options):
-        '''pull handshake and dictionary'''
-        while True:
-            work = self.get_url(self.conf['get_work_url']+'='+self.conf['hc_ver'], options)
-            try:
-                netdata = json.loads(work)
-                if len(netdata['hash']) != 32:
-                    raise ValueError
-                if len(netdata['dhash']) != 32:
-                    raise ValueError
-                if not self.valid_mac(netdata['bssid']):
-                    raise ValueError
-
-                return netdata
-            except (TypeError, ValueError, KeyError):
-                if work == 'Version':
-                    self.pprint('Please update help_crack, the API has changed', 'FAIL')
-                    exit(1)
-                if work == 'No nets!?':
-                    self.pprint('No suitable net found', 'WARNING')
-
-            self.pprint('Server response error', 'WARNING')
-            self.sleepy()
-
     @staticmethod
     def hccapx2john(hccapx):
         '''convert hccapx struct to JtR $WPAPSK$ and implement nonce correction
@@ -328,40 +311,41 @@ class HelpCrack(object):
             JtR:    https://github.com/magnumripper/JohnTheRipper/blob/bleeding-jumbo/src/wpapcap2john.c
         '''
 
-        def pack_jtr(hccap, message_pair, nc=0):
+        def pack_jtr(hccap, message_pair, ncorr=0):
             '''prepare handshake in JtR format'''
             jtr = b'%s:$WPAPSK$%s#%s:%s:%s:%s::%s:%s:/dev/null\n'
+            hccap_fmt = '< 36s 6s 6s 32x 28x 4s 256x 4x I 16x'
 
-            #get essid
-            essid = hccap[:36].rstrip(b'\0')
+            (essid, mac_ap, mac_sta, corr, keyver) = struct.unpack(hccap_fmt, hccap)
 
-            #replay count checked
+            # replay count checked
             if message_pair & 0x80 > 1:
                 ver = b'verified'
             else:
                 ver = b'not verified'
 
-            #detect endian and apply nonce correction
-            corr = hccap[108:112]
-            if nc != 0:
+            # detect endian and apply nonce correction
+            if ncorr != 0:
                 try:
                     if message_pair & 0x40 > 1:
-                        ver += b', fuzz ' + str(nc).encode() + b' BE'
+                        ver += b', fuzz ' + str(ncorr).encode() + b' BE'
                         dcorr = struct.unpack('>L', corr)[0]
-                        corr = struct.pack('>L', dcorr + nc)
+                        corr = struct.pack('>L', dcorr + ncorr)
                     if message_pair & 0x20 > 1:
-                        ver += b', fuzz ' + str(nc).encode() + b' LE'
+                        ver += b', fuzz ' + str(ncorr).encode() + b' LE'
                         dcorr = struct.unpack('<L', corr)[0]
-                        corr = struct.pack('<L', dcorr + nc)
+                        corr = struct.pack('<L', dcorr + ncorr)
                 except struct.error:
                     pass
 
-            #cut essid part and stuff correction
+            # cut essid part and stuff correction
             newhccap = hccap[36:108] + corr + hccap[112:]
 
-            mac_sta = binascii.hexlify(hccap[42:47])
-            mac_ap = binascii.hexlify(hccap[36:42])
-            keyver = struct.unpack('<L', hccap[372:376])[0]
+            # prepare values for JtR
+            essid = essid.rstrip(b'\0')
+            mac_sta = binascii.hexlify(mac_sta)
+            mac_ap = binascii.hexlify(mac_ap)
+
             if keyver == 1:
                 keyver = b'WPA'
             elif keyver == 2:
@@ -369,13 +353,13 @@ class HelpCrack(object):
             elif keyver >= 3:
                 keyver = b'WPA CMAC'
 
-            #prepare translation to base64 alphabet used by JtR
+            # prepare translation to base64 alphabet used by JtR
             encode_trans = maketrans(b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
                                      b'./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')
 
             return jtr % (essid,
                           essid,
-                          binascii.b2a_base64(newhccap).translate(encode_trans).rstrip(b'=\n'),
+                          binascii.b2a_base64(newhccap).translate(encode_trans).rstrip(b'=\r\n'),
                           mac_sta,
                           mac_ap,
                           mac_ap,
@@ -384,53 +368,49 @@ class HelpCrack(object):
 
         def hccapx2hccap(hccapx):
             '''convert hccapx to hccap struct'''
-            #essid
-            hccap = hccapx[10:42] + b'\x00\x00\x00\x00'
-            #mac1 = mac_ap
-            hccap += hccapx[59:65]
-            #mac2 = mac_sta
-            hccap += hccapx[97:103]
-            #snonce = nonce_sta
-            hccap += hccapx[103:135]
-            #anonce = nonce_ap
-            hccap += hccapx[65:97]
-            #eapol
-            hccap += hccapx[137:393]
-            #eapol_size = eapol_len
-            hccap += hccapx[135:137] + b'\x00\x00'
-            #keyver
-            hccap += hccapx[42:43] + b'\x00\x00\x00'
-            #keymic
-            hccap += hccapx[43:59]
+            hccapx_fmt = '< 4x 4x B x 32s B 16s 6s 32s 6s 32s H 256s'
+            hccap_fmt = '< 36s 6s 6s 32s 32s 256s I I 16s'
 
-            return hccap
+            (message_pair,
+             essid,
+             keyver, keymic,
+             mac_ap, nonce_ap, mac_sta, nonce_sta,
+             eapol_len, eapol) = struct.unpack(hccapx_fmt, hccapx)
+
+            hccap = struct.pack(
+                hccap_fmt,
+                essid,
+                mac_ap, mac_sta,
+                nonce_sta, nonce_ap,
+                eapol, eapol_len,
+                keyver, keymic)
+
+            return (hccap, message_pair)
 
         hccapx = bytearray(hccapx)
-        #get message_pair
-        message_pair = hccapx[8]
 
-        #convert hccapx to hccap
-        hccap = hccapx2hccap(hccapx)
+        # convert hccapx to hccap and extract message_pair
+        (hccap, message_pair) = hccapx2hccap(hccapx)
 
-        #exact handshake
+        # exact handshake
         hccaps = pack_jtr(hccap, message_pair)
         if message_pair & 0x10 > 1:
             return hccaps
 
-        #detect if we have endianness info
+        # detect if we have endianness info
         flip = False
         if message_pair & 0x60 == 0:
             flip = True
-            #set flag for LE
+            # set flag for LE
             message_pair |= 0x20
 
-        #prepare nonce correction
-        for i in range(1, 128):
+        # prepare nonce correction
+        for i in range(1, 129):
             if flip:
-                #this comes with LE set first time if we don't have endianness info
+                # this comes with LE set first time if we don't have endianness info
                 hccaps += pack_jtr(hccap, message_pair, i)
                 hccaps += pack_jtr(hccap, message_pair, -i)
-                #toggle BE/LE bits
+                # toggle BE/LE bits
                 message_pair ^= 0x60
 
             hccaps += pack_jtr(hccap, message_pair, i)
@@ -438,55 +418,95 @@ class HelpCrack(object):
 
         return hccaps
 
+    def get_work(self, options):
+        '''pull handshakes and optionally dictionary location/ssid'''
+        while True:
+            work = self.get_url(self.conf['get_work_url']+'='+self.conf['hc_ver'], options)
+            try:
+                netdata = json.loads(work)
+                if not (any('ssid' in d for d in netdata) or any('hkey' in d for d in netdata)):
+                    raise ValueError
+
+                return netdata
+            except (TypeError, ValueError, KeyError):
+                if work == 'Version':
+                    self.pprint('Please update help_crack, the API has changed', 'FAIL')
+                    exit(1)
+                if 'ssid' in options and work == 'No nets':
+                    self.pprint('User dictionary check finished', 'OKGREEN')
+                    exit(0)
+                if work == 'No nets':
+                    self.pprint('No suitable nets found', 'WARNING')
+                    self.sleepy()
+                    continue
+
+            self.pprint('Server response error', 'WARNING')
+            self.sleepy()
+
     def prepare_work(self, netdata):
-        '''prepare work based on netdata; returns dictname'''
+        '''prepare work based on netdata; returns dictname and ssid/hkey'''
         if netdata is None:
             return False
 
-        if self.conf['format'] == 'hccapx':
-            handshake = binascii.a2b_base64(netdata['hccapx'])
-        else:
-            handshake = self.hccapx2john(binascii.a2b_base64(netdata['hccapx']))
-
-        #write net
+        # extract ssid/hkey, handshakes and dict details
+        metadata = {}
         try:
             with open(self.conf['net_file'], 'wb') as fd:
-                fd.write(handshake)
-            with open("handshakes.hccapx", 'a') as fx:      #DAW Save handshakes in one large file 
-                fx.write(handshake)                         #DAW for later bulk cracking.
+                for part in netdata:
+                    if 'hkey' in part:
+                        metadata['hkey'] = part['hkey']
+                    if 'dhash' in part:
+                        metadata['dhash'] = part['dhash']
+                    if 'dpath' in part:
+                        metadata['dpath'] = part['dpath']
+                    if 'ssid' in part:
+                        metadata['ssid'] = part['ssid']
+                    if 'hccapx' in part:
+                        if self.conf['format'] == 'hccapx':
+                            fd.write(binascii.a2b_base64(part['hccapx']))
+                            with open("handshakes.hccapx", 'a') as fx:               # DAW
+                                fx.write(binascii.a2b_base64(part['hccapx']))        # DAW
+                        else:
+                            fd.write(self.hccapx2john(binascii.a2b_base64(part['hccapx'])))
+                        metadata['hccapx'] = binascii.a2b_base64(part['hccapx'])                         # DAW-whats this for???
+                        
+            if not (any('ssid' in d for d in netdata) or any('hkey' in d for d in netdata)):
+                self.pprint('hkey or ssid not found in work package!', 'FAIL')
+                exit(1)
         except OSError as e:
             self.pprint('Handshake write failed', 'FAIL')
             self.pprint('Exception: {0}'.format(e), 'FAIL')
             exit(1)
 
-        #check for dict and download it
-        if 'dpath' not in netdata:
-            return True
+        # do we have to process dictionary?
+        if 'dpath' not in metadata:
+            return metadata
 
+        # check for dict and download it
         dictmd5 = ''
         extract = False
-        gzdictname = netdata['dpath'].split('/')[-1]
-        dictname = gzdictname.rsplit('.', 1)[0]
+        gzdictname = metadata['dpath'].split('/')[-1]
+        metadata['dictname'] = gzdictname.rsplit('.', 1)[0]
 
         while True:
             if os.path.exists(gzdictname):
                 dictmd5 = self.md5file(gzdictname)
-            if netdata['dhash'] != dictmd5:
+            if metadata['dhash'] != dictmd5:
                 self.pprint('Downloading ' + gzdictname, 'OKBLUE')
-                self.download(netdata['dpath'], gzdictname)
-                if self.md5file(gzdictname) != netdata['dhash']:
-                    self.pprint('Dict downloaded but hash mismatch dpath:{0} dhash:{1}'.format(netdata['dpath'], netdata['dhash']), 'WARNING')
+                self.download(metadata['dpath'], gzdictname)
+                if self.md5file(gzdictname) != metadata['dhash']:
+                    self.pprint('Dict downloaded but hash mismatch', 'WARNING')
 
                 extract = True
 
-            if not os.path.exists(dictname):
+            if not os.path.exists(metadata['dictname']):
                 extract = True
 
             if extract:
                 self.pprint('Extracting ' + gzdictname, 'OKBLUE')
                 try:
                     with gzip.open(gzdictname, 'rb') as ftgz:
-                        with open(dictname, 'wb') as fd:
+                        with open(metadata['dictname'], 'wb') as fd:
                             while True:
                                 chunk = ftgz.read(self.blocksize)
                                 if not chunk:
@@ -497,39 +517,29 @@ class HelpCrack(object):
                     self.pprint('Exception: {0}'.format(e), 'FAIL')
                     self.sleepy()
                     continue
-                
-        #DAW add call to routerkeygen if cracked.txt
-        if(dictname == 'cracked.txt'):
-            essid_length = handshake[9]
-            essid = handshake[10:(10+essid_length)].rstrip(b'\0')
-            bssid = netdata['bssid']
-            getdict = 0     #DAW re-activate once mysql database running
-            keygen_return = routerkeygen(self, bssid, ssid, getdict)
 
-
-        return dictname
+            return metadata
 
     def prepare_challenge(self):
         '''prepare chalenge with known PSK'''
-        netdata = {'hccapx': """SENQWAQAAAAABWRsaW5rAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAiaaYe8l4TWktCODLsTs\
+        netdata = [{'hccapx': """SENQWAQAAAAABWRsaW5rAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAiaaYe8l4TWktCODLsTs\
                                 x/QcfuXi8tDb0kmj6c7GztM2D7o/rpukqm7Gx2EFeW/2taIJ0YeCygAmxy5JAGRbH2hKJWbiEmbx\
                                 I6vDhsxXb1k+bcXjgjoy+9Svkp9RewABAwB3AgEKAAAAAAAAAAAAAGRbH2hKJWbiEmbxI6vDhsxX\
                                 b1k+bcXjgjoy+9Svkp9RAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
                                 AAAAAAAAABgwFgEAAA+sAgEAAA+sBAEAAA+sAjwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
                                 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
                                 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA""",
-                   'bssid': '1c:7e:e5:e2:f2:d0',
-                   'hash': '0747af15ffbd5ce545c862dd1e36d727',
-                   'key': 'aaaa1234',
-                   'dictname': 'challenge.txt'}
+                    'key': 'aaaa1234',
+                    'dictname': 'challenge.txt'},
+                   {'ssid': ''}]
         try:
-            #create dict
+            # create dict
             try:
-                data = netdata['key'] + "\n"
-                with open(netdata['dictname'], 'wb') as fd:
+                data = netdata[0]['key'] + "\n"
+                with open(netdata[0]['dictname'], 'wb') as fd:
                     fd.write(data.encode())
             except OSError as e:
-                self.pprint(netdata['dictname'] + ' creation failed', 'FAIL')
+                self.pprint(netdata[0]['dictname'] + ' creation failed', 'FAIL')
                 self.pprint('Exception: {0}'.format(e), 'FAIL')
                 exit(1)
 
@@ -539,11 +549,17 @@ class HelpCrack(object):
             self.pprint('Exception: {0}'.format(e), 'FAIL')
             exit(1)
 
-    def put_work(self, handshakehash, pwkey):
+    def put_work(self, metadata, keypair):
         '''return results to server'''
+        keys = {}
+        if 'hkey' in metadata:
+            keys['hkey'] = metadata['hkey']
+        if keypair is not None:
+            for pad, k in enumerate(keypair):
+                keys[(b'z%03d' % pad) + k['bssid']] = k['key']
+        data = urlencode(keys).encode()
         while True:
             try:
-                data = urlencode({handshakehash: pwkey}).encode()
                 response = urlopen(self.conf['put_work_url'], data)
                 response.close()
                 return True
@@ -563,8 +579,11 @@ class HelpCrack(object):
             with open(self.conf['res_file']) as fd:
                 try:
                     netdata = json.load(fd)
-                    if len(netdata['hash']) != 32:
+                    if not (any('ssid' in d for d in netdata) or any('hkey' in d for d in netdata)):
                         raise ValueError
+                    if not any('hkey' in d for d in netdata) and self.conf['custom'] is None:
+                        self.pprint('Can\'t resume from custom dictionary attack', 'WARNING')
+                        return None
                     self.pprint('Session resume', 'OKBLUE')
                     return netdata
                 except (TypeError, ValueError, KeyError):
@@ -572,143 +591,256 @@ class HelpCrack(object):
                     os.unlink(self.conf['res_file'])
 
         return None
-    
-#***************************routerkeygen****************************************
 
-    def routerkeygen(self, bssid, ssid, getdict):
-    #bssid is expected in 6 colon separated octets
-    #ssid should be utf-8
-    #getdict is the trigger to download cracked.txt (for when a file is inserted in wpa  sql)
-    #candidates are appended to cracked.txt and will be overwritten each time it is downloaded
-    #routine should be called after checking dict and downloading current cracked.txt
-        #if getdict == 1:
-            #g=getcracked()
-                
-        #print cc['OKBLUE'] + 'Extracting cracked.txt.gz' + cc['ENDC']
-                
+    def getcracked(self):
+        "Get cracked.txt file. Return False if failure, True if success"
+        self.pprint('Downloading cracked.txt.gz', 'OKBLUE')
+        if not self.download("http://wpa-sec.stanev.org/dict/cracked.txt.gz", "cracked.txt.gz"):
+            self.pprint('Can\'t download cracked.txt.gz', 'WARNING')
+            return False
+
+        #self.pprint('Extracting cracked.txt.gz', 'OKBLUE')
+        
         #try:
-            #with gzip.open("cracked.txt.gz", 'rb') as ftgz:
-                #f = open("cracked.txt", 'wb')
-                #while True:
-                        #block = ftgz.read(blocksize)
-                        #if block == '':
-                                #break
-                        #f.write(block)
-            #f.close()
-            #ftgz.close()
+        #with gzip.open("cracked.txt.gz", 'rb') as ftgz:
+            #f = open("cracked.txt", 'wb')
+            #while True:
+            #block = ftgz.read(self.blocksize)
+            #if block == '':
+                #break
+            #f.write(block)
+        #f.close()
+        #ftgz.close()
         
         #except Exception as e:
-            #print cc['FAIL'] + 'cracked.txt.gz' + ' extraction failed' + cc['ENDC']
-            #print cc['FAIL'] + 'Exception: {0}'.format(e) + cc['ENDC']
+        #self.pprint('cracked.txt.gz extraction failed', 'FAIL')
+        #self.pprint('Exception: {0}'.format(e), 'FAIL')
+        #return False
+        
+        #subprocess.call("cat 10k-most-common.txt >>cracked.txt", shell=True) 
+        return True
+
+    # routerkeygen function. Returns candidates in cracked.txt file 
+    # Expects bssid as lower case hex without colons, ssid as extracted, getdict = 1 if not cracked.txt in main
+    def routerkeygen(self, bssid, ssid, getdict):
+        
+        bssid = bssid = bssid[0:2] + \
+            b':' + bssid[2:4] + \
+            b':' + bssid[4:6] + \
+            b':' + bssid[6:8] + \
+            b':' + bssid[8:10] + \
+            b':' + bssid[10:12]
                 
-        
-        subprocess.call("cat 10k-most-common.txt >>cracked.txt", shell=True)
-        
+        if getdict == 1:
+            g=self.getcracked()
+            
+        self.pprint('Extracting cracked.txt.gz', 'OKBLUE')
+        try:
+            with gzip.open("cracked.txt.gz", 'rb') as ftgz:
+                f = open("cracked.txt", 'wb')
+                while True:
+                    block = ftgz.read(self.blocksize)
+                    if block == '':
+                        break
+                    f.write(block)
+            f.close()
+            ftgz.close()
+        except Exception as e:
+            self.pprint('cracked.txt.gz extraction failed', 'FAIL')
+            self.pprint('Exception: {0}'.format(e), 'FAIL')
+            
+        subprocess.call("cat all.potfiles.txt >>cracked.txt", shell=True)
         
         bssidupper = bssid.upper()
-        print '**********************************************************************************'
-        print 'Trying routerkeygen for {0} {1}' .format(bssidupper, ssid)
-        keygen = 'routerkeygen -m {0} -s "{1}" -q' .format(bssidupper, ssid)
-        print keygen
-        candid = open(candid_file, 'w')
-        try:
-            subprocess.call(shlex.split(keygen), stdout=candid)
-        except subprocess.CalledProcessError as e:
-            print cc['FAIL'] + 'Exception: {0}'.format(e) + cc['ENDC']
-            pass
+        print("**********************************************************************************")
+        #print('Trying routerkeygen for {0} {1}' .format(bssidupper, ssid))
+        #keygen = 'routerkeygen -m {0} -s "{1}" -q' .format(bssidupper, ssid)
+        #print('{0}' .format(keygen))
+        #with open(self.conf['can_file'], 'w') as candid:
+            #try:
+                #subprocess.call(shlex.split(keygen), stdout=candid)
+            #except subprocess.CalledProcessError as e:
+                #self.pprint('Exception: {0}'.format(e), 'FAIL')
+                #pass
+        #candid.close()
+        ##subprocess.call("cat candidates.txt >>candidatelog.txt", shell=True) # Grows too large
+        #subprocess.call("cat candidates.txt >>cracked.txt", shell=True)
+        with open("cracked.txt", 'a') as f:
+            f.write("************End Routerkeygen***************" + "\n")
+            f.write(ssid + "\n")
+            f.write(ssid.lower() + "\n")
+            f.write(ssid.upper() + "\n")
+            f.write(ssid.capitalize() + "\n")
+            f.write(ssid.replace(" ","") + "\n")
+            f.write(ssid.replace(" ","").lower() + "\n")
+            f.write(ssid.replace(" ","").upper() + "\n")
+            f.write(ssid.replace(" ","").capitalize() + "\n")
+            f.write(ssid.replace("_","") + "\n")
+            f.write(ssid.replace("_","").lower() + "\n")
+            f.write(ssid.replace("_","").upper() + "\n")
+            f.write(ssid.replace("_","").capitalize() + "\n")
+            f.write(ssid.replace("-","") + "\n")
+            f.write(ssid.replace("-","").lower() + "\n")
+            f.write(ssid.replace("-","").upper() + "\n")
+            f.write(ssid.replace("-","").capitalize() + "\n")
+            f.write(ssid.replace(".","") + "\n")
+            f.write(ssid.replace(".","").lower() + "\n")
+            f.write(ssid.replace(".","").upper() + "\n")
+            f.write(ssid.replace(".","").capitalize() + "\n")
+            f.write(ssid.replace("&","").lower() + "\n")
+            f.write(ssid.replace("&","").upper() + "\n")
+            f.write(ssid.replace("&","").capitalize() + "\n")
+            f.write(bssid.replace(":","") + "\n")
+            f.write(bssidupper.replace(":","") + "\n")
         
-        candid.close()
-        subprocess.call("cat candidates.txt >>cracked.txt", shell=True)
-        f = open("cracked.txt", 'a')
-        f.write(ssid + "\n")
-        f.write(ssid.lower() + "\n")
-        f.write(ssid.upper() + "\n")
-        f.write(ssid.capitalize() + "\n")
-        f.write(ssid.replace(" ","") + "\n")
-        f.write(ssid.replace("_","") + "\n")
-        f.write(ssid.replace("-","") + "\n")
-        f.write(ssid.replace(".","") + "\n")
-        f.write(bssid.replace(":","") + "\n")
-        f.write(bssidupper.replace(":","") + "\n")
-    
-    # ssid walk to extract substrings. j is the length of the substring, i is the start of the string
-        length = len(ssid)
-        if length > 3:
-            j = 4
-            while (j < length+1):
-                i = 0
-                while (i <= length-j):
-                    substring = ssid[i:i+j]
-                    f.write(substring.lower() + "\n")
-                    f.write(substring.upper() + "\n")
-                    f.write(substring.capitalize() + "\n")	        
-                    i = i +1	    
+        # ssid walk to extract substrings. j is the length of the substring, i is the start of the string
+        # add common number endings, rotate left, rotate right, repeat, add spaces, TODO toggle characters like best64 rules
+            suffix3 = ['123', '666', '777', '007', '111', '200', '100', '321', '101', '999', '555', '333', '001', '456', '199',
+                       '222', '198', '000', '420', '888', '911', '197', '789', '143', '201', '112', '121', '812', '234', '500',
+                       '196', '444', '300', '987', '345', '182', '125', '159', '147', '102', '135', '120', '316', '567', '900',
+                       '110', '150', '122', '600', '250']
+            suffix4 = ['1234', '12345', '123456', '1234567', '12345678', '123456789', '1234567890',
+                       '0123', '01234', '012345', '0123456', '01234567', '012345678', '0123456789']
+            length = len(ssid)
+            if length > 3:
+                j = 4
+                while (j < length+1):
+                    i = 0
+                    while (i <= length-j):
+                        SuBsTrInG = ssid[i:i+j]
+                        substring = ssid[i:i+j].lower()
+                        Substring = ssid[i:i+j].capitalize()
+                        SUBSTRING = ssid[i:i+j].upper()
+                        
+                        f.write(SuBsTrInG + "\n")               # Unmodified
+                        f.write(substring + "\n")               # Lower case
+                        f.write(Substring + "\n")               # Capital case
+                        f.write(SUBSTRING + "\n")               # Upper case
+                        f.write('{0}{0}'.format(SuBsTrInG) +"\n")
+                        f.write('{0}{0}'.format(substring) +"\n")
+                        f.write('{0}{0}'.format(Substring) +"\n")
+                        f.write('{0}{0}'.format(SUBSTRING) +"\n")
+                        f.write('{0}{0}{0}'.format(SuBsTrInG) +"\n")
+                        f.write('{0}{0}{0}'.format(substring) +"\n")
+                        f.write('{0}{0}{0}'.format(Substring) +"\n")
+                        f.write('{0}{0}{0}'.format(SUBSTRING) +"\n")
+                        for suffix in suffix4:
+                            f.write('{}{}'.format(SuBsTrInG, suffix) + "\n")
+                            f.write('{}{}'.format(substring, suffix) + "\n")
+                            f.write('{}{}'.format(Substring, suffix) + "\n")
+                            f.write('{}{}'.format(SUBSTRING, suffix) + "\n")
+                        for k in range(1921, 2020):
+                            f.write('{}{}'.format(SuBsTrInG, k) + "\n")
+                            f.write('{}{}'.format(substring, k) + "\n")
+                            f.write('{}{}'.format(Substring, k) + "\n")
+                            f.write('{}{}'.format(SUBSTRING, k) + "\n")
+                        if j >= 5:
+                            for suffix in suffix3:
+                                f.write('{}{}'.format(SuBsTrInG, suffix) + "\n")
+                                f.write('{}{}'.format(substring, suffix) + "\n")
+                                f.write('{}{}'.format(Substring, suffix) + "\n")
+                                f.write('{}{}'.format(SUBSTRING, suffix) + "\n")
+                        if j >= 6:
+                            for k in range(0, 99):
+                                f.write('{}{:02d}'.format(SuBsTrInG, k) + "\n")
+                                f.write('{}{:02d}'.format(substring, k) + "\n")
+                                f.write('{}{:02d}'.format(Substring, k) + "\n")
+                                f.write('{}{:02d}'.format(SUBSTRING, k) + "\n")
+                        if j >= 7:
+                            for k in range(0, 9):
+                                f.write('{}{}'.format(SuBsTrInG, k) + "\n")
+                                f.write('{}{}'.format(substring, k) + "\n")
+                                f.write('{}{}'.format(Substring, k) + "\n")
+                                f.write('{}{}'.format(SUBSTRING, k) + "\n")
+                        if j >= 8:
+                            for k in range(0, length):
+                                f.write(SuBsTrInG[k:] + SuBsTrInG[:k] + "\n")
+                                f.write(substring[k:] + substring[:k] + "\n")
+                                f.write(Substring[k:] + Substring[:k] + "\n")
+                                f.write(SUBSTRING[k:] + SUBSTRING[:k] + "\n")
+                                f.write(SuBsTrInG[:k] + SuBsTrInG[k:] + "\n")
+                                f.write(substring[:k] + substring[k:] + "\n")
+                                f.write(Substring[:k] + Substring[k:] + "\n")
+                                f.write(SUBSTRING[:k] + SUBSTRING[k:] + "\n")
+                                f.write(SuBsTrInG[0:k] + " " + SuBsTrInG[k:] +"\n")
+                                f.write(substring[0:k] + " " + substring[k:] + "\n")
+                                f.write(Substring[0:k] + " " + Substring[k:] + "\n")
+                                f.write(SUBSTRING[0:k] + " " + SUBSTRING[k:] + "\n")
+                                
+                        i = i +1	    
+                    j = j + 1
+                
+        #mac walk
+            mac = bssidupper
+            mac1 = mac[0:2]
+            mac2 = mac[3:5]
+            mac3 = mac[6:8]
+            mac4 = mac[9:11]
+            mac5 = mac[12:14]
+            mac6 = mac[15:17]
+            macleft = mac[0:14]
+            macshort = macleft.replace(":","")
+            maclen = len(macshort)		
+            prefix = '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+            j = -16
+            while (j <= 16):
+                mac6dec = int(mac6,16)
+                mac6increment = mac6dec + j
+                if mac6increment <16:
+                    incmac6 = '0' + hex(mac6increment)[-1:]
+                else:
+                    incmac6 = hex(mac6increment)[-2:]
+                newmac = macshort + incmac6
+                newmacright = newmac[-6:]
+                decnewmac = int(newmac,16)
+                f.write(newmac[-8:].upper() + "\n")
+                f.write(newmac[-9:].upper() + "\n")
+                f.write(newmac[-10:].upper() + "\n")
+                f.write(newmac[-11:].upper() + "\n")
+                f.write(newmac[-12:].upper() + "\n")
+                f.write(newmac[-8:].lower() + "\n")
+                f.write(newmac[-9:].lower() + "\n")
+                f.write(newmac[-10:].lower() + "\n")
+                f.write(newmac[-11:].lower() + "\n")
+                f.write(newmac[-12:].lower() + "\n")
+                dec8 = decnewmac % 100000000
+                dec9 = decnewmac % 1000000000
+                dec10 = decnewmac % 10000000000
+                dec11 = decnewmac % 100000000000
+                dec12 = decnewmac % 1000000000000
+                f.write('{:d}'.format(dec8) + "\n")
+                f.write('{:d}'.format(dec9) + "\n")
+                f.write('{:d}'.format(dec10) + "\n")
+                f.write('{:d}'.format(dec11) + "\n")
+                f.write('{:d}'.format(dec12) + "\n")
+
+                #Add last 6 incremented mac to ssid from 2 to length 
+                i = 2
+                while i <= length:
+                    combo = '{0}{1}' .format(ssid[0:i].upper(), newmacright.upper())
+                    f.write(combo + "\n")
+                    combo = '{0}{1}' .format(ssid[0:i].lower(), newmacright.lower())
+                    f.write(combo + "\n")
+                    i = i + 1
+                    
+                #Add prefixes to incremented mac from 7 to 12 in length
+                n = 0
+                while n < 37:
+                    k = 7
+                    while k < 13:
+                        prefixmac = prefix[n-1:n] + newmac[-k:].upper()
+                        f.write(prefixmac + "\n")
+                        f.write(prefixmac.lower() + "\n")
+                        k = k + 1
+                    n = n + 1
+                    
+                # TODO permute mac
+                    
                 j = j + 1
+
             
-    #mac walk
-        mac = bssidupper
-        mac1 = mac[0:2]
-        mac2 = mac[3:5]
-        mac3 = mac[6:8]
-        mac4 = mac[9:11]
-        mac5 = mac[12:14]
-        mac6 = mac[15:17]
-        macleft = mac[0:14]
-        macshort = macleft.replace(":","")
-        maclen = len(macshort)		
-        prefix = '1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-        j = -16
-        while (j <= 16):
-            mac6dec = int(mac6,16)
-            mac6increment = mac6dec + j
-            if mac6increment <16:
-                incmac6 = '0' + hex(mac6increment)[-1:]
-            else:
-                incmac6 = hex(mac6increment)[-2:]
-            newmac = macshort + incmac6
-            newmacright = newmac[-6:]
-            decnewmac = int(newmac,16)
-            f.write(newmac[-8:].upper() + "\n")
-            f.write(newmac[-9:].upper() + "\n")
-            f.write(newmac[-10:].upper() + "\n")
-            f.write(newmac[-11:].upper() + "\n")
-            f.write(newmac[-12:].upper() + "\n")
-            dec8 = decnewmac % 100000000
-            dec9 = decnewmac % 1000000000
-            dec10 = decnewmac % 10000000000
-            dec11 = decnewmac % 100000000000
-            dec12 = decnewmac % 1000000000000
-            f.write('{:d}'.format(dec8) + "\n")
-            f.write('{:d}'.format(dec9) + "\n")
-            f.write('{:d}'.format(dec10) + "\n")
-            f.write('{:d}'.format(dec11) + "\n")
-            f.write('{:d}'.format(dec12) + "\n")
-
-            #Add last 6 incremented mac to ssid from 2 to length 
-            i = 2
-            while i <= length:
-                combo = '{0}{1}' .format(ssid[0:i], newmacright.upper())
-                f.write(combo + "\n")
-                i = i + 1
-                
-            #Add prefixes to incremented mac from 8 to 12 in length
-            n = 0
-            while n < 37:
-                k = 8
-                while k < 13:
-                    prefixmac = prefix[n-1:n] + newmac[-k:].upper()
-                    f.write(prefixmac + "\n")
-                    k = k + 1
-                n = n + 1	    
-                
-            j = j + 1
-
-        
-        f.close()
+            f.close()
         return(1)
-    
-*****************************run_cracker**************************************
-
 
     def run_cracker(self, dictname, disablestdout=False):
         '''run externel cracker process'''
@@ -719,65 +851,125 @@ class HelpCrack(object):
         while True:
             try:
                 if self.conf['format'] == 'hccapx':
-                    try:
-                        cracker = '{0} -m2500 --nonce-error-corrections=128 --outfile-autohex-disable --potfile-disable --outfile-format=2 {1} -o{2} {3} {4}'.format(self.conf['cracker'], self.conf['coptions'], self.conf['key_file'], self.conf['net_file'], dictname)
-                        subprocess.check_call(shlex.split(cracker), stdout=fd)
-                    except subprocess.CalledProcessError as ex:
-                        if fd:
-                            fd.close()
-                        if ex.returncode == -2:
-                            self.pprint('Thermal watchdog barked', 'WARNING')
-                            self.sleepy()
-                            continue
-                        if ex.returncode == 1:
-                            return 1
-                        self.pprint('hashcat {0} died with code {1}'.format(self.conf['cracker'], ex.returncode), 'FAIL')
+                    cracker = '{0} -m2500 --nonce-error-corrections=128 --logfile-disable --potfile-disable -w 3 {1} -o{2} {3} {4}'.format(self.conf['cracker'], self.conf['coptions'], self.conf['key_file'], self.conf['net_file'], dictname)
+                    rc = subprocess.call(shlex.split(cracker), stdout=fd)
+                    if rc == -2:
+                        self.pprint('Thermal watchdog barked', 'WARNING')
+                        self.sleepy()
+                        continue
+                    if rc >= 2:
+                        self.pprint('hashcat {0} died with code {1}'.format(self.conf['cracker'], rc), 'FAIL')
                         self.pprint('Check you have OpenCL support', 'FAIL')
                         exit(1)
 
+
+
+
+
+
                 if self.conf['format'] == 'wpapsk':
-                    try:
-                        cracker = '{0} {1} --pot={2} --wordlist={3} {4}'.format(self.conf['cracker'], self.conf['coptions'], self.conf['key_file'], dictname, self.conf['net_file'])
-                        subprocess.check_call(shlex.split(cracker), stdout=fd)
-                    except subprocess.CalledProcessError as ex:
-                        self.pprint('john {0} died with code {1}'.format(self.conf['cracker'], ex.returncode), 'FAIL')
+                    cracker = '{0} {1} --pot={2} --wordlist={3} {4}'.format(self.conf['cracker'], self.conf['coptions'], self.conf['key_file'], dictname, self.conf['net_file'])
+                    rc = subprocess.call(shlex.split(cracker), stdout=fd)
+                    if rc != 0:
+                        self.pprint('john {0} died with code {1}'.format(self.conf['cracker'], rc), 'FAIL')
                         exit(1)
 
-                    if not os.path.exists(self.conf['key_file']):
-                        return 1
-                    if os.path.getsize(self.conf['key_file']) == 0:
-                        return 1
-            except KeyboardInterrupt as ex:
+            except KeyboardInterrupt:
                 self.pprint('\nKeyboard interrupt', 'OKBLUE')
-                if os.path.exists(self.conf['key_file']):
-                    os.unlink(self.conf['key_file'])
                 exit(0)
 
-            return 0
+            if fd:
+                fd.close()
 
+            return
+
+ 
+ 
+ 
+ 
     def get_key(self):
-        '''read key from file'''
-        key = ''
+        '''read bssid and key pairs from file'''
+
+        def parse_hashcat(pot):
+            '''parse hashcat potfile line'''
+            try:
+                arr = pot.split(b':', 4)
+                bssid = arr[1][:12]
+                bssid = bssid = bssid[0:2] + \
+                    b':' + bssid[2:4] + \
+                    b':' + bssid[4:6] + \
+                    b':' + bssid[6:8] + \
+                    b':' + bssid[8:10] + \
+                    b':' + bssid[10:12]
+                return {'bssid': bssid, 'key': arr[4].rstrip(b'\r\n')}
+            except (TypeError, ValueError, KeyError):
+                pass
+
+            return False
+
+        def parse_jtr(pot):
+            '''parse JtR potfile line'''
+            def jb64decode(jb64):
+                '''JtR b64 decode'''
+                encode_trans = maketrans(b'./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+                                         b'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/')
+                b64 = jb64.translate(encode_trans) + b'='
+
+                return binascii.a2b_base64(b64)
+
+            arr = pot.split(b':', 1)
+            if len(arr) != 2:
+                return False
+            key = arr[1].rstrip(b'\r\n')
+
+            arr = arr[0].split(b'#', 1)
+            if len(arr) != 2:
+                return False
+
+            try:
+                phccap = jb64decode(arr[1])
+                bssid = binascii.hexlify(phccap[:6])
+                bssid = bssid[0:2] + \
+                    b':' + bssid[2:4] + \
+                    b':' + bssid[4:6] + \
+                    b':' + bssid[6:8] + \
+                    b':' + bssid[8:10] + \
+                    b':' + bssid[10:12]
+            except (binascii.Error, binascii.Incomplete):
+                return False
+
+            return {'bssid': bssid, 'key': key}
+
+        res = []
         try:
-            if self.conf['format'] == 'hccapx':
-                if os.path.exists(self.conf['key_file']):
-                    with open(self.conf['key_file'], 'rb') as fd:
-                        key = fd.readline()
-                    key = key.rstrip(b'\n')
+            if os.path.exists(self.conf['key_file']):
+                with open(self.conf['key_file'], 'rb') as fd:
+                    while True:
+                        line = fd.readline()
+                        if not line:
+                            break
 
-            if self.conf['format'] == 'wpapsk':
-                if os.path.exists(self.conf['key_file']):
-                    with open(self.conf['key_file'], 'rb') as fd:
-                        key = fd.readline()
-                    key = key.rstrip(b'\n')[100:]
-                    key = key[key.find(b':')+1:]
+                        # check if we have user potfile. Don't write if it's the challenge
+                        if self.conf['potfile'] and not \
+                            (b'76c6eaf116d91cc1450561b00c98ea19' in line
+                             or b'55vZsj9E.0P59YY.N3gTO2cZNi6GNj2XewC4n3RjKH' in line):
+                            with open(self.conf['potfile'], 'ab') as fdpot:
+                                fdpot.write(line)
 
-            if len(key) >= 8:
+                        if self.conf['format'] == 'hccapx':
+                            keypair = parse_hashcat(line)
+
+                        if self.conf['format'] == 'wpapsk':
+                            keypair = parse_jtr(line)
+
+                        if keypair:
+                            res.append(keypair)
+
+            if res:
                 os.unlink(self.conf['key_file'])
-                return key
-
+                return res
         except IOError as e:
-            self.pprint('Couldn\'t read key', 'FAIL')
+            self.pprint('Couldn\'t read pot file', 'FAIL')
             self.pprint('Exception: {0}'.format(e), 'FAIL')
             exit(1)
 
@@ -788,47 +980,80 @@ class HelpCrack(object):
         self.check_version()
         self.check_tools()
 
-        #challenge the cracker
+        # challenge the cracker
         self.pprint('Challenge cracker for correct results', 'OKBLUE')
         netdata = self.prepare_challenge()
         self.prepare_work(netdata)
-        rc = self.run_cracker(netdata['dictname'], disablestdout=True)
-        key = self.get_key()
+        self.run_cracker(netdata[0]['dictname'], disablestdout=True)
+        keypair = self.get_key()
 
-        if rc != 0 or key != bytearray(netdata['key'], 'utf-8', errors='ignore'):
+        if not keypair or keypair[0]['key'] != bytearray(netdata[0]['key'], 'utf-8', errors='ignore'):
             self.pprint('Challenge solving failed! Check if your cracker runs correctly.', 'FAIL')
             exit(1)
 
+        hashcache = set()
         netdata = self.resume_check()
-
+        metadata = {'ssid': '00'}
+        options = {'format': self.conf['format'], 'cracker': self.conf['cracker']}
+        run_count = 0                                                                               # DAW
         while True:
             if netdata is None:
-                netdata = self.get_work_wl(json.JSONEncoder().encode({'format': self.conf['format'], 'cracker': self.conf['cracker']}))
+                if self.conf['custom']:
+                    options['ssid'] = metadata['ssid']
+                netdata = self.get_work(json.JSONEncoder().encode(options))
 
             self.create_resume(netdata)
+            metadata = self.prepare_work(netdata)
+            
+            getdict = 0                                                                            # DAW
+            if run_count >= 10:                                                                    # DAW
+                getdict = 1
+                run_count = 0
+            if metadata['dictname'] == "cracked.txt":
+                getdict = 0
+            handshake = metadata['hccapx']                                                          # DAW extract essid
+            essid = handshake[10:42].rstrip(b'\0')                                                  # DAW
+            bssid = binascii.hexlify(handshake[59:65])                                              # DAW  
+            kgret = self.routerkeygen(bssid, essid, getdict)                                        # DAW
 
-            dictname = self.prepare_work(netdata)
+            if self.conf['custom']:
+                metadata['dictname'] = self.conf['custom']
 
             runadditional = True
             while True:
-                rc = self.run_cracker(dictname)
-                if rc == 0:
-                    key = self.get_key()
-                    self.pprint('Key for capture hash {0} is: {1}'.format(netdata['hash'], key.decode(sys.stdout.encoding or 'utf-8', errors='ignore')), 'OKGREEN')
-                    with open("help_crack.log", 'a') as kh:                                     #DAW Log cracked handshakes since potfile disabled
-                        logstring = '{}|{}|{}\n'.format(netdata['hash'], netdata['bssid'], key) #DAW
-                        kh.write(logstring)                                                     #DAW
-                    self.put_work(netdata['hash'], key)
-                    break
-                self.pprint('Exausted', 'OKBLUE')
+                keypair = None
+                self.run_cracker(metadata['dictname'])
 
-                if conf['additional'] is not None and runadditional:
-                    dictname = conf['additional']
+                keypair = self.get_key()
+                if keypair:
+                    for k in keypair:
+                        handshake = (metadata['hccapx'])                                                        # DAW extract essid
+                        essid = handshake[10:42].rstrip(b'\0')                                                  # DAW
+                        self.pprint('Key for bssid {0} is: {1}'.format(k['bssid'].decode(sys.stdout.encoding or 'utf-8', errors='ignore'),
+                                                                       k['key'].decode(sys.stdout.encoding or 'utf-8', errors='ignore')), 'OKGREEN')
+                        with open("help_crack.log", 'a') as kh:                                                 # DAW update logfile
+                            logstring = '{}|{}|{}|{}\n'.format(metadata['hkey'], k['bssid'], essid, k['key'].decode(sys.stdout.encoding or 'utf-8', errors='ignore'))   #DAW
+                            kh.write(logstring)                                                                 # DAW
+
+                if not runadditional and not keypair:
+                    break
+
+                self.put_work(metadata, keypair)
+
+                # compute handshakes simple hash
+                ndhash = 0
+                for part in netdata:
+                    if 'hccapx' in part:
+                        ndhash ^= hash(part['hccapx'])
+
+                if conf['additional'] is not None and runadditional and ndhash not in hashcache:
+                    hashcache.add(ndhash)
+                    metadata['dictname'] = conf['additional']
                     runadditional = False
                     continue
                 break
-
-            #cleanup
+            run_count += 1                                                                                  # DAW
+            # cleanup
             if os.path.exists(self.conf['net_file']):
                 os.unlink(self.conf['net_file'])
             if os.path.exists(self.conf['res_file']):
@@ -846,16 +1071,23 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='help_crack, distributed WPA cracker site: {0}'.format(conf['base_url']))
     parser.add_argument('-v', '--version', action='version', version=conf['hc_ver'])
-    parser.add_argument('-ad', '--additional', type=lambda x: is_valid_file(parser, x), help='additional user dictionary to be checked after downloaded one')
     parser.add_argument('-co', '--coptions', type=str, help='custom options, that will be supplied to cracker. Those must be passed as -co="--your_option"')
+    parser.add_argument('-pot', '--potfile', type=str, help='preserve cracked results in user supplied pot file')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('-ad', '--additional', type=lambda x: is_valid_file(parser, x), help='additional user dictionary to be checked after downloaded one')
+    group.add_argument('-cd', '--custom', type=lambda x: is_valid_file(parser, x), help='custom user dictionary to be checked against all uncracked handshakes')
+
     try:
         args = parser.parse_args()
     except IOError as e:
         parser.error(str(e))
 
     conf['additional'] = args.additional
+    conf['custom'] = args.custom
     if args.coptions:
         conf['coptions'] = args.coptions
+    if args.potfile:
+        conf['potfile'] = args.potfile
 
     hc = HelpCrack(conf)
     hc.run()
