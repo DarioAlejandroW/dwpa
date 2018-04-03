@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-'''Clientside part of dwpa distributed cracker Ver 1.1.2 based on 1.0.2
+'''Clientside part of dwpa distributed cracker Ver 1.1.1 based on 1.0.1
 The source code is distributed under GPLv3+ license
 author: Alex Stanev, alex at stanev dot org  additions by Dario Alejandro
 web: https://wpa-sec.stanev.org'''
@@ -28,9 +28,7 @@ from functools import partial
 import StringIO         # DAW
 import base64			# DAW
 import datetime			# DAW
-import MySQLdb			# DAW Not used in 1.1.2
-import socket			# DAW
-
+import MySQLdb			# DAW Not used in 1.1.1
 try:
     from urllib import urlretrieve
     from urllib import urlopen
@@ -63,7 +61,7 @@ conf = {
     'potfile': None,
     'cracker': '',
     'coptions': '',
-    'hc_ver': '1.1.2'                               # DAW Follows Alex's version 1.0.2 Rev date 30 Mar 2018
+    'hc_ver': '1.1.1'                               # DAW Follows Alex's version 1.0.1 Rev date 30 Mar 2018
 }
 conf['help_crack'] = conf['base_url'] + 'hc/help_crack.py'
 conf['help_crack_cl'] = conf['base_url'] + 'hc/CHANGELOG'
