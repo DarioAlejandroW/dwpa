@@ -1080,8 +1080,7 @@ class HelpCrack(object):
                 metadata['dictname'] = self.conf['custom']
 
             runadditional = True
-            if metadata['dictname'] == "cracked.txt":			#DAW skip if cracked.txt
-		runadditional = False
+
             while True:
                 keypair = None
                 self.run_cracker(metadata['dictname'])
@@ -1107,6 +1106,9 @@ class HelpCrack(object):
                 for part in netdata:
                     if 'hccapx' in part:
                         ndhash ^= hash(part['hccapx'])
+			
+		if metadata['dictname'] == "cracked.txt":			#DAW skip if cracked.txt
+		    runadditional = False
 
                 if conf['additional'] is not None and runadditional and ndhash not in hashcache:
                     hashcache.add(ndhash)
