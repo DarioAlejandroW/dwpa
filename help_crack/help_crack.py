@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
+##!/usr/bin/env python3
 """
 Clientside part of dwpa distributed cracker
 The source code is distributed under GPLv3+ license
-author: Alex Stanev, alex at stanev dot org
+author: Alex Stanev, alex at stanev dot org.
 web: https://wpa-sec.stanev.org
+DAW version 2.3.1 28 Nov 2024
 """
 
 import argparse
@@ -28,7 +29,10 @@ from urllib.request import Request, urlopen, urlretrieve
 conf = {
     "base_url"      : "https://wpa-sec.stanev.org/",
     "res_file"      : "help_crack.res",
+    "res_archive"   : "archive.res",         #DAW
     "hash_file"     : "help_crack.hash",
+    "hash_archive"  : "archive.22000",       #DAW
+    "prdict_archive": "archive.prdict",      #DAW
     "key_file"      : "help_crack.key",
     "rules_file"    : "help_crack.rules",
     "additional"    : None,
@@ -37,8 +41,10 @@ conf = {
     "cracker"       : "",
     "coptions"      : "",
     "rules"         : "",
-    "hc_ver"        : "2.2.0",
-    "hashcat_ver"   : "6.2.6"
+    "hc_ver"        : "2.2.0",  #follow Alex's API level'
+    "dw_ver"        : "2.3.1",   #DAW 28 Nov 2024
+    "hashcat_ver"   : "6.2.6",
+    "dl_count"      : 99        #DAW download counter 99 to trigger after first run
 }
 conf["help_crack"]    = f"{conf['base_url']}hc/help_crack.py"
 conf["help_crack_cl"] = f"{conf['base_url']}hc/CHANGELOG"
@@ -71,7 +77,7 @@ class HelpCrack():
                  }
             print(f"{cc[code]}{mess}{cc['ENDC']}")
 
-    def sleepy(self, sec=222):
+    def sleepy(self, sec=123):
         """wait for calm down"""
         self.pprint("Sleeping...", "WARNING")
         try:
@@ -434,15 +440,21 @@ class HelpCrack():
                 for h in netdata["hashes"]:
                     if self.conf["format"] == "22000":
                         fd.write(f"{h}\n")
-                        # write rules, just for hashcat for now
+                        #write rules, just for hashcat used for second round
                         if "rules" in netdata:
                             with open(self.conf["rules_file"], "wb") as fdr:
                                 fdr.write(binascii.a2b_base64(netdata["rules"]))
-                                self.conf["rules"] = f"-S --loopback -r {self.conf['rules_file']}"
+                                self.conf["rules"] = f"-S -r {self.conf['rules_file']}"
                         else:
                             self.conf["rules"] = ""
                     else:
                         fd.write(self.m22000john(h))
+
+            with open(self.conf["hash_archive"], "a", encoding="utf-8") as fe:     #DAW hash archive write
+                for h in netdata["hashes"]:
+                    if self.conf["format"] == "22000":
+                        fe.write(f"{h}\n")
+
         except OSError as e:
             self.pprint("Hash file write failed", "FAIL")
             self.pprint(f"Exception: {e}", "FAIL")
@@ -453,6 +465,49 @@ class HelpCrack():
             sys.exit(1)
 
         return metadata
+
+    def expandcracked(self):    #DAW Expand cracked and rkg with bestWPA rules
+
+        self.pprint('Extracting cracked.txt.gz', 'OKBLUE')
+        try:
+            with gzip.open("cracked.txt.gz", 'rb') as ftgz:
+                with open("cracked.txt", 'wb') as fd:
+                    while True:
+                        chunk = ftgz.read(self.blocksize)
+                        if not chunk:
+                            break
+                        fd.write(chunk)
+        except (IOError, OSError, EOFError, zlib.error) as e:
+            self.pprint('cracked.txt.gz extraction failed', 'FAIL')
+            self.pprint('Exception: {0}'.format(e), 'FAIL')
+            return      #DAW continue with old dictionay if failure
+
+        self.pprint('Downloading rkg.txt.gz', 'OKBLUE')
+        if not self.download("https://wpa-sec.stanev.org/dict/rkg.txt.gz", "rkg.txt.gz"):
+            self.pprint('Can\'t download rkg.txt.gz', 'WARNING')
+        self.pprint('Extracting rkg.txt.gz', 'OKBLUE')
+        try:
+            with gzip.open("rkg.txt.gz", 'rb') as ftgz:
+                with open("cracked.txt", 'ab') as fd:
+                    while True:
+                        chunk = ftgz.read(self.blocksize)
+                        if not chunk:
+                            break
+                        fd.write(chunk)
+        except (IOError, OSError, EOFError, zlib.error) as e:
+            self.pprint('rkg.txt.gz extraction failed', 'FAIL')
+            self.pprint('Exception: {0}'.format(e), 'FAIL')
+            return      #DAW continue with old dictionay if failure
+
+        self.pprint('Expanding cracked.txt with bestWPA.rule', 'OKBLUE')
+        if os.path.exists("source.txt"):
+            os.unlink("source.txt")
+        os.rename("cracked.txt", "source.txt")
+        if os.path.exists("cracked.txt.gz"):
+             os.unlink("cracked.txt.gz")
+        expando = "./hashcat.bin --stdout --quiet -w 4 -o cracked.txt.gz -r bestWPA.rule source.txt"
+        rc = subprocess.call(shlex.split(expando), stdout=None)
+
 
     def prepare_dicts(self, netdata):
         """download and check dictionaries"""
@@ -465,11 +520,19 @@ class HelpCrack():
             while True:
                 for d in netdata["dicts"]:
                     gzdictname = d["dpath"].split("/")[-1]
-                    if not os.path.exists(gzdictname) or d["dhash"] != self.md5file(gzdictname):
+                    if gzdictname == "cracked.txt.gz":
+                        conf["dl_count"] += 1
+                        if conf["dl_count"] >= 101: #DAW only download once every 100 times. Skip on startup
+                            self.pprint('Downloading cracked.txt.gz', 'OKBLUE')
+                            self.download(d["dpath"], gzdictname)
+                            self.expandcracked()
+                            conf["dl_count"] = 0
+                    if not os.path.exists(gzdictname):
                         self.pprint(f"Downloading {gzdictname}", "OKBLUE")
                         self.download(d["dpath"], gzdictname)
                         if d["dhash"] != self.md5file(gzdictname):
                             self.pprint(f"Dictionary {gzdictname} hash mismatch, continue", "WARNING")
+
                     if self.conf["format"] == "22000":
                         dlist.append(gzdictname)
                     else:
@@ -492,22 +555,137 @@ class HelpCrack():
             return None
 
         if "prdict" in netdata and netdata["prdict"] and any("cracked.txt" in s["dpath"] for s in netdata["dicts"]):
-            self.pprint("Downloading PR dynamic dictionary", "OKBLUE")
+            self.pprint("Downloading Poll Request dynamic dictionary", "OKBLUE")
             self.download(f"{self.conf['prdict_url']}={netdata['hkey']}", "prdict.txt.gz")
+            try:
+                with gzip.open("prdict.txt.gz", "rb") as gz_file:
+                    with open("source.txt", "wb") as fd:
+                        for chunk in iter(lambda: read_chunk(gz_file, self.blocksize), b""):
+                            fd.write(chunk)
+            except (IOError, OSError, EOFError) as e:
+                self.pprint("PR dynamic dictionary extraction failed", "FAIL")
+                self.pprint(f"Exception: {e}", "FAIL")
+                return dlist
+                
+                
             if self.conf["format"] == "22000":
-                dlist.insert(0, "prdict.txt.gz")
+                self.pprint('Expanding prdict.txt with bestWPA.rule', 'OKBLUE')
+                if os.path.exists("prdict.txt.gz"):
+                    os.unlink("prdict.txt.gz")
+                expando = "./hashcat.bin --stdout --quiet -o prdict.txt.gz -r bestWPA.rule source.txt"
+                rc = subprocess.call(shlex.split(expando), stdout=None)
+                if os.path.exists("prdict.txt.gz"):
+                    dlist.insert(0, "prdict.txt.gz")
+                else:
+                     self.pprint("Prdict not found", "FAIL")
             else:
-                try:
-                    with gzip.open("prdict.txt.gz", "rb") as gz_file:
-                        with open("prdict.txt", "wb") as fd:
-                            for chunk in iter(lambda: read_chunk(gz_file, self.blocksize), b""):
-                                fd.write(chunk)
+                if os.path.exists("source.txt"):
+                    os.rename("source.txt", "prdict.txt")
                     dlist.insert(0, "prdict.txt")
-                except (IOError, OSError, EOFError) as e:
-                    self.pprint("PR dynamic dictionary extraction failed", "FAIL")
-                    self.pprint(f"Exception: {e}", "FAIL")
 
         return dlist
+
+
+    def prepare_essidbssids(self, netdata):          #DAW
+        '''Prepare list with essid and all bssids'''
+        #Pull essid and bssid from netdata, 1 essid and (multiple) bssid
+        if netdata is None:
+            return False
+
+        bssidlist = list()
+
+        for hashline in netdata["hashes"]:
+            hash_arr = hashline.split("*", 8)
+            if len(hash_arr) != 9 or hash_arr[0] != "WPA":
+                return ""
+            essid = bytes.fromhex(hash_arr[5]).decode('utf-8', errors='ignore')
+            bssidlist.append(essid)
+            break
+
+        for hashline in netdata["hashes"]:
+            hash_arr = hashline.split("*", 8)
+            if len(hash_arr) != 9 or hash_arr[0] != "WPA":
+                return ""
+            bssid = hash_arr[3]
+            if bssid not in bssidlist:
+                bssidlist.append(bssid)
+
+        return bssidlist
+
+    def testtarget(self, essidbssids, dictlist):        #DAW returns dictlist0, dictionaries to run without rules
+        dlist=[]
+        essid = essidbssids[0]
+
+        if "help_crack.challenge.dict.gz" in dictlist:
+            return dlist
+
+        if re.match("(?:NETGEAR|ORBI|NTGR_VMB_|ARLO_VMB_)[0-9][0-9]", essid):
+            target = "netgear.txt"
+        elif re.match("(?:MySpectrum|SpectrumSetup|MyCharter)", essid):
+            target = "MySpectrum.txt"
+        elif re.match("(?:INFINITUM|speedy|ALHN-|vodafone|FibraETB|AXTEL-XTREMO|ALU-I240WA|STC_WiFi|VIETTEL|ONT|GO_WiFi|true_home2G|SINGTEL|VodafoneNet|VIVACOM_FiberNet|ORANGEFIBER|CANALBOX|INEA)", essid):
+            target = "digit10.txt"
+        elif re.match("(?:HOME-[0-9A-F]{4}|CBCI|SPSETUP|XFSETUP)", essid):
+            target = "phome.txt"
+        elif re.match("(?:TENDA|NOVA_)", essid):       #DAW verify regex for this target
+            target = "tenda.txt"
+        elif re.match("EE-Hub", essid):
+            target = "eeupper.txt"
+        elif re.match("(?:^EE-|5GHz-EE|BrightBox|EE-BrightBox)", essid):
+            target = "EE.txt"
+        elif re.match("(?:MyAltice|MyOptimum)", essid):
+            target = "altice.txt"
+
+        elif self.imeigentest(essid) == 0:        # IMEIGEN Dicts generate dynamic dictionary
+            target = "imeigen.txt"
+
+        else:
+            if os.path.exists(self.conf['hash_file']):
+                cangen = './hcxpsktool -c help_crack.hash -o candidates.txt'
+                rc = subprocess.call(shlex.split(cangen), stdout=None)
+                target = "candidates.txt"
+
+        if "cracked.txt.gz" in dictlist:
+            if target != "candidates.txt":
+                dlist.insert(0,target)
+                dlist.insert(1, "cracked.txt.gz")
+            else:
+                dlist.insert(0, "cracked.txt.gz")
+                dlist.insert(1,target)
+        else:
+            dlist.insert(0,target)
+
+        if "prdict.txt.gz" in dictlist:
+            dlist.insert(0, "prdict.txt.gz")
+
+        if self.conf["additional"] is not None:
+            if self.conf["additional"] not in dictlist:
+                dlist.append(self.conf["additional"])
+
+        return dlist
+
+    def imeigentest(self, essid):
+        routers = ["MW45AN_", "MobileRouter-","MW45V_", "MTS874FT_", "VINNWiFi_", "Optus E583C ", "MTS850FT-", "BeelineS23_", "pocketwifi-", "VIVACOM 4G WiFi_", \
+        "Airtel 4G MiFi-", "MegaFonMR150-6_", "SVITIN-", "MTN MiFi E5830S", "E5830-", "MTS8920FT_", "XLGO-", "BeelineSM25_", "MTS81020FTPB_", "MW70VK_", \
+        "MTS81231FT_", "MTS81220FT_", "MobileWiFi-{", "Optus E586 ", "congstar.home_", "HH71VM_", "MTS872FT_", "HH40V_", "MTS8723FT_", "Beeline_", "MTS81330FT_", \
+        "OptusWiFi E5331 ", "Globe_LTE MIFI_", "inwi Home 4G ", "BOX4G_Inwi_", "Andromax-M3Y-", "MTS8330FT_", "MTS8213FT-", "Orange Airbox-", "OLAX_LTE_", \
+        "MTS835F_", "Connect4G", "MTS837F_", "TP-LINK_M5360_", "MTS81140FT_", "VIVACOM 4G WI-FI", "TP-LINK_M5350_", "MTS831_", "ALTEL4G-", "Domino-", "MTS838FT_", \
+        "VIVACOM 3G WI-FI", "MTS8430FT_", "imotowifi", "SMILE 4G LTE-", "ALTEL4G_", "ALTEL 4G_", "4GEEOnetouchY800z_", "HUAWEI-E5577-", "MTS833_", "VIVA-4G-LTE-", \
+        "Orange-", "501HWa-", "MTS8212FT_", "4G-Gateway-", "inwi Home 4G", "ZTE MF90+ ", "MTS411D_", "MTS835FT_"]
+        for test in routers:
+            if re.match(test, essid):
+                if test == "VIVA-4G-LTE-":
+                    gentarget = f"./imeigen '{test}' | sed 's/^/VIVA/' > imeigen.txt"
+                elif test == "501HWa-":
+                    gentarget = f"./imeigen '{test}' | sed 's/$/a/' > imeigen.txt"
+                else:
+                    gentarget = f"./imeigen '{test}' > imeigen.txt"
+
+                subprocess.run(gentarget, shell=True, check = True)
+                return 0
+
+        return 1
+
 
     def prepare_challenge(self):
         """prepare challenge with known PSK"""
@@ -519,8 +697,7 @@ cc576f593e6dc5e3823a32fbd4af929f51000000000000000000000000000000\
 0000000000000000000000000000000000000000000000000000000000000000\
 00001830160100000fac020100000fac040100000fac023c000000*00"""],
                     "key": "aaaa1234",
-                    "dictname": "help_crack.challenge.dict"
-                  }
+                    "dictname": "help_crack.challenge.dict"}
 
         try:
             # create dict
@@ -554,13 +731,16 @@ cc576f593e6dc5e3823a32fbd4af929f51000000000000000000000000000000\
               "cand": cand}
         pwjson = json.dumps(pw).encode("utf-8")
 
-        self.get_url(self.conf["put_work_url"], pwjson)
 
+        self.get_url(self.conf["put_work_url"], pwjson)
 
     def create_resume(self, netdata):
         """create resume file"""
         with open(self.conf["res_file"], "w", encoding="utf-8") as fd:
             json.dump(netdata, fd)
+        with open(self.conf["res_archive"], "a", encoding="utf-8") as fe:       #DAW store complete getwork in archive
+            json.dump(netdata, fe)
+            fe.write('\n')
 
     def resume_check(self):
         """check for resume files"""
@@ -590,7 +770,7 @@ cc576f593e6dc5e3823a32fbd4af929f51000000000000000000000000000000\
 
         if os.path.exists(self.conf["hash_file"]):
             if self.conf["format"] == "22000":
-                cracker = f"{self.conf['cracker']} -m22000 --advice-disable --logfile-disable --potfile-disable --nonce-error-corrections=8 --session help_crack {self.conf['rules']} {self.conf['coptions']} -o{self.conf['key_file']} {self.conf['hash_file']} "
+                cracker = f"{self.conf['cracker']} -m22000 -w 4 --advice-disable --logfile-disable --potfile-disable --nonce-error-corrections=8 --session help_crack {self.conf['rules']} {self.conf['coptions']} -o{self.conf['key_file']} {self.conf['hash_file']} "
                 cracker += " ".join(dictlist)
 
                 while True:
@@ -599,11 +779,10 @@ cc576f593e6dc5e3823a32fbd4af929f51000000000000000000000000000000\
                         self.pprint("Thermal watchdog barked", "WARNING")
                         self.sleepy()
                         continue
-                    if rc == 5:
-                        return 5
                     if rc >= 2 or rc == -1:
                         self.pprint(f"hashcat died with code {rc}", "FAIL")
-                        sys.exit(1)
+                        self.sleepy()
+                        continue
                     break
 
             # TODO: use multiple -w:, when/if availible, see https://github.com/openwall/john/issues/3262
@@ -620,7 +799,7 @@ cc576f593e6dc5e3823a32fbd4af929f51000000000000000000000000000000\
         if fd:
             fd.close()
 
-        return 0
+        return rc
 
     def get_key(self):
         """read bssid and key pairs from file"""
@@ -732,14 +911,26 @@ cc576f593e6dc5e3823a32fbd4af929f51000000000000000000000000000000\
                 self.sleepy()
                 continue
 
-            # do we have additional user dictionary supplied?
-            if self.conf["additional"] is not None:
-                if self.conf["additional"] not in dictlist:
-                    dictlist.append(self.conf["additional"])
+            # extract essid and bssids from hash list, then insert into dictlist
+            essidbssids = self.prepare_essidbssids(netdata)
+            dictlist0 = self.testtarget(essidbssids, dictlist)
+
+            # do we have additional user dictionary supplied? DAW moved to preparedicts()
 
             # run cracker and collect results
+            self.pprint(f"Now cracking: {essidbssids}", "OKGREEN")
             cstart = time.time()
-            rc = self.run_cracker(dictlist)
+            self.conf["rules"] = ""
+            if dictlist0:    #DAW run without applying rules (prdict,cracked, hcxpsktool, common)
+                if "prdict.txt.gz" in dictlist:
+                    dictlist.remove("prdict.txt.gz")
+                if "cracked.txt.gz" in dictlist:
+                    dictlist.remove("cracked.txt.gz")
+                rc = self.run_cracker(dictlist0)
+            if (len(dictlist) >= 1) and((rc == 1 and dictlist0) or not dictlist0):
+                if "rules" in netdata:
+                    self.conf["rules"] = f"-S -r {self.conf['rules_file']}"
+                self.run_cracker(dictlist)
             cdiff = int(time.time() - cstart)
 
             # check for cracked keys
@@ -753,10 +944,10 @@ cc576f593e6dc5e3823a32fbd4af929f51000000000000000000000000000000\
             self.put_work(keypair, metadata["hkey"])
 
             # autotune dictionary count
-            if dictcount < 15 and cdiff < 300:  # 5 min
+            if dictcount < 15 and cdiff < 900:  # 15 min
                 dictcount += 1
                 self.pprint(f"Incrementing dictionary count to {dictcount}, last duration {cdiff}s", "OKBLUE")
-            if dictcount > 1 and cdiff > 300:
+            if dictcount > 1 and cdiff > 900:
                 dictcount -= 1
                 self.pprint(f"Decrementing dictionary count to {dictcount}, last duration {cdiff}s", "OKBLUE")
 
@@ -764,11 +955,6 @@ cc576f593e6dc5e3823a32fbd4af929f51000000000000000000000000000000\
             if os.path.exists(self.conf["res_file"]):
                 os.unlink(self.conf["res_file"])
             netdata = None
-
-            # check if user requested exit
-            if rc == 5:
-                self.pprint("User exit requested", "OKBLUE")
-                sys.exit(0)
 
 
 def signal_handler(sig, frame): # pylint: disable=unused-argument
@@ -787,7 +973,7 @@ if __name__ == "__main__":
         return arg
 
     parser = argparse.ArgumentParser(description=f"help_crack, distributed WPA cracker site: {conf['base_url']}")
-    parser.add_argument("-v",   "--version",    action="version", version=conf["hc_ver"])
+    parser.add_argument("-v",   "--help_crack.challenge.dictversion",    action="version", version=conf["hc_ver"])
     parser.add_argument("-co",  "--coptions",   type=str, help="custom options, that will be supplied to cracker. Those must be passed as -co='--your_option'")
     parser.add_argument("-pot", "--potfile",    type=str, help="preserve cracked results in user supplied pot file")
     parser.add_argument("-ad",  "--additional", type=lambda x: is_valid_file(parser, x), help="additional user dictionary to be checked after downloaded one")
