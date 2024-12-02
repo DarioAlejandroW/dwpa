@@ -147,3 +147,41 @@ ver 2.2.0 / 21 Oct 2024
  * support for dynamic PROBEREQUEST dictionary
  * fix hash convert error for JtR
  * exit gracefully on hashcat's [f]inish
+
+Ver 2.2.0 10 Sept 2024
+*follow upstream 2.1.0
+*Add archive for full getwork download.
+*Add M22000 archive.
+*Disabled rules file. We'll run rules on cracked.txt in a separate routine.
+*Add downloading rkg.txt, combining with cracked.txt then expanding with bestWPA.rules.
+*Disabled downloading cracked.txt.gz every time. Put counter so it downloads after X requests.
+
+Ver 2.2.1 16 Sept 2024
+*follow upstream 2.1.1
+*Extract essid and bssids from hashlist.
+*Based on essid select known algorithim dict or default hcxpsktool.
+*Insert known or hcspsktool dict at beginning of dictlist, unless cracked.txt.gz, then second.
+*Increase dictcount timer to 900 seconds.
+
+Ver 2.2.2 16 Sept 2024
+*Changed logic for inserting targeted dict. If not hcxpsktool dict, insert first.
+
+2.3.0 27 Oct 2024
+*follow upstream 2.2.0
+*Included downloading prdict
+*Re-enabled rule file write
+*Separated dictlist dictlist0 has target, hcxpsktool, cracked, prdict, additional. These do not have rules applied
+*Two pass cracking, first without rules - dictlist0, second with rules - dictlist
+*Expand prdict with bestWPA.rules. Test for file before adding to dictionary list
+*Updated testarget() to include eeupper and altice dictionaries
+
+2.3.1 27 Nov 2024
+*Added call to imeigen  in testtarget()
+*Set frequency for cracked.txt.gz download to every 100 calls
+*Removed --loopback parameter in call to hashcat
+
+TODO
+*Convert call to imeigen to inline python
+*log prdict essid and bssid
+*Autotune -w based on overheating
+
